@@ -50,15 +50,16 @@ class MoinMoinPasswordStore(Component):
         return usernames
 
     def check_password(self, user, password):
-        self.log.debug('acct_mgr: checking password for %s ' % user)
+        self.log.info('acct_mgr: checking password for %s ' % user)
         if self._is_user_ignored(user):
             return None
 
         users = self._read_users()
         for name in users:
             if name == user:
-                self.log.debug('User %s found, checking pw.' % name)
-                return self._crypt_context.verify(password, users[name])
+                pw_correct = self._crypt_context.verify(password, users[name])
+                self.log.info('User %s found, pw check success: %s' % (name, pw_correct))
+                return pw_correct
 
         return None
 
