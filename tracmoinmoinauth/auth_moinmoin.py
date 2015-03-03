@@ -110,6 +110,7 @@ class MoinMoinPasswordStore(Component):
                 continue
             if self._is_user_ignored(name):
                 continue
+            name = name.decode('utf8')
             users[name] = password
 
         self._user_cache = users
