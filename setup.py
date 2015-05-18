@@ -4,7 +4,7 @@ extra = {}
 
 setup(
     name='TracMoinMoinAuthPlugin',
-    version="0.1",
+    version="0.2",
     description="Trac MoinMoin Auth",
     author="HolgerCremer",
     author_email="HolgerCremer@gmail.com",

@@ -1,67 +1,54 @@
 # -*- coding: utf-8 -*-
 #
-# Manages user accounts stored in MoinMoin user directory.
+# Manages users from MoinMoin
 # Author: HolgerCremer@gmail.com
 #
-from os import listdir, stat
-from os.path import join, exists
-import re
-
-from passlib.context import CryptContext
 
 from trac.core import Component, implements
 from trac.config import Option, BoolOption
 
 from acct_mgr.api import IPasswordStore
+from moinmoin_auth_by_provider import MoinMoinAuthByProvider
+from moinmoin_user_dir import MoinMoinUserDir
 
 
 class MoinMoinPasswordStore(Component):
     implements(IPasswordStore)
 
-    USER_FILE_RE = re.compile(r'^[0-9\.]+$')
-
+    mm_auth_method = Option('moinmoinauth', 'mm_auth_method', doc='"dir" or "auth_provider"')
+    mm_auth_provider_url = Option('moinmoinauth', 'mm_auth_provider_url',
+                                  doc='The url to the ..... If set, this has priority over the mm_user_dir option.')
+    mm_auth_provider_psk = Option('moinmoinauth', 'mm_auth_provider_psk', doc='The psk/key for the auth service.')
+    mm_auth_provider_fingerprint = Option('moinmoinauth', 'mm_auth_provider_fingerprint',
+                                          doc='The fingerprint for the ssl certificate of the auth service.')
+    mm_auth_provider_ca_certs = Option('moinmoinauth', 'mm_auth_provider_ca_certs',
+                                          doc='File with custom ca certificates.')
     mm_user_dir = Option('moinmoinauth', 'mm_user_dir', doc='The MoinMoin users directory')
     disable_cache = BoolOption('moinmoinauth', 'disable_cache', default=False,
-                               doc='Caches (as default) the user data from the MoinMoin user directory.')
+                               doc='Caches (as default) the user data from the MoinMoin user directory or the server response.')
 
     def __init__(self):
-        if self.mm_user_dir is None:
-            raise ValueError('No "mm_user_dir" configuration.')
-        if not exists(self.mm_user_dir):
-            raise ValueError('mm_user_dir "%s" doesn`t exist!' % self.mm_user_dir)
-
-        self._crypt_context = CryptContext(
-            # is the default value in the MoinMoin wiki
-            schemes=['sha512_crypt', ]
-        )
-
-        self._user_cache = None
-        self._user_cache_check = None
+        if self.mm_auth_method == 'dir':
+            self._user_impl = MoinMoinUserDir(self.log, self.mm_user_dir, self.disable_cache)
+        elif self.mm_auth_method == 'auth_provider':
+            self._user_impl = MoinMoinAuthByProvider(self.log, self.mm_auth_provider_url, self.mm_auth_provider_psk,
+                                                     self.mm_auth_provider_fingerprint, self.mm_auth_provider_ca_certs, self.disable_cache)
+        else:
+            raise ValueError('Unknown value "%s" for mm_auth_method. Use "dir" or "auth_provider"' % self.mm_auth_method)
 
     def has_user(self, user):
-        return self._read_users().has_key(user)
+        return user in self._user_impl.get_users()
 
     def get_users(self):
         self.log.debug('getting user list...')
-        usernames = []
-        for name in self._read_users():
-            usernames.append(name)
-
-        return usernames
+        return self._user_impl.get_users()
 
     def check_password(self, user, password):
         self.log.info('acct_mgr: checking password for %s ' % user)
         if self._is_user_ignored(user):
             return None
 
-        users = self._read_users()
-        for name in users:
-            if name == user:
-                pw_correct = self._crypt_context.verify(password, users[name])
-                self.log.info('User %s found, pw check success: %s' % (name, pw_correct))
-                return pw_correct
-
-        return None
+        return self._user_impl.check_password(user, password)
 
     def set_password(self, user, password, old_password=None):
         raise NotImplementedError
@@ -77,68 +64,3 @@ class MoinMoinPasswordStore(Component):
             return True
         # our groups start with '__group__'
         return username.startswith('__group__')
-
-    def _must_read_again(self):
-        if self.disable_cache:
-            return True
-
-        if self._user_cache is None or self._user_cache_check is None:
-            self._user_cache_check = self._get_dir_check_value()
-            return True
-
-        new_check = self._get_dir_check_value()
-        if new_check == self._user_cache_check:
-            return False
-        self._user_cache_check = new_check
-        return True
-
-    def _get_dir_check_value(self):
-        (mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime) = stat(self.mm_user_dir)
-        return '%s-%s-%s-%s' % (size, atime, mtime, ctime)
-
-    def _read_users(self):
-        if not self._must_read_again():
-            return self._user_cache
-
-        self.log.debug('read user data again')
-        users = {}
-        for file in listdir(self.mm_user_dir):
-            if self.USER_FILE_RE.match(file) is None:
-                continue
-            (name, password) = self._get_name_and_password(file)
-            if name is None:
-                continue
-            if self._is_user_ignored(name):
-                continue
-            name = name.decode('utf8')
-            users[name] = password
-
-        self._user_cache = users
-        return users
-
-
-    def _get_name_and_password(self, file_name):
-        name_prefix = 'name='
-        pw_prefix = 'enc_password='
-        scheme_prefix = '{PASSLIB}'
-        name, password = None, None
-        with open(join(self.mm_user_dir, file_name), "r") as file:
-            for line in file:
-                if line.startswith(name_prefix):
-                    # remove prefix and newline
-                    name = line[len(name_prefix):len(line) - 1]
-                elif line.startswith(pw_prefix):
-                    # remove prefix and newline
-                    password = line[len(pw_prefix):len(line) - 1]
-                    # check for passlib prefix
-                    if not password.startswith(scheme_prefix):
-                        self.log.warn('Unsupported scheme prefix. User "%s" won´t login.' % file_name.encode('utf8', 'ignore'))
-                        return (None, None)
-                    # remove the scheme prefix
-                    password = password[len(scheme_prefix):]
-
-                if name is not None and password is not None:
-                    return (name, password)
-
-        self.log.warn('No %s and %s entries found for file %s.' % (name_prefix, pw_prefix, file_name.encode('utf8', 'ignore')))
-        return (None, None)
